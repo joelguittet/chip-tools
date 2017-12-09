@@ -27,7 +27,7 @@ The 3.3V TTL serial interface is available on pins UART1-TX and UART1-RX on C.H.
 
 The following schema can be used to interface the 3.3V TTL interface to an RS232 compatible port.
 
-![chip-serial-debug-rs232](https://github.com/myfreescalewebpage/chip-tools/chip-serial-debug-rs232.png)
+![chip-serial-debug-rs232](https://github.com/myfreescalewebpage/chip-tools/blob/master/chip-serial-debug-rs232.png)
 
 It is also possible to use an FTDI USB to 3.3V TTL converter.
 
