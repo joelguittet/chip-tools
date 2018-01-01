@@ -82,6 +82,9 @@ SPL_PADDED_SIZE=$(filesize "${SPL_PADDED}")
 SPL_PADDED_SIZE=$(($SPL_PADDED_SIZE / ($NAND_PAGE_SIZE + $NAND_OOB_SIZE)))
 SPL_PADDED_SIZE=$(echo $SPL_PADDED_SIZE | xargs printf "0x%08x")
 
+# Compute UBI size in bytes
+UBI_SIZE=`filesize $UBI | xargs printf "0x%08x"`
+
 echo == Preparing u-boot ==
 UBOOT_PADDED_SIZE=0x400000
 UBOOT_PADDED="$TMPDIR/u-boot-padded-dtb.bin"
@@ -109,9 +112,6 @@ echo "mw \${scriptaddr} 0x0" >> "${UBOOT_SCRIPT_SRC}"
 echo "boot" >> "${UBOOT_SCRIPT_SRC}"
 mkimage -A arm -T script -C none -n "u-boot script" -d "${UBOOT_SCRIPT_SRC}" "${UBOOT_SCRIPT_BIN}"
 echo OK
-
-# Compute UBI size in bytes
-UBI_SIZE=`filesize $UBI | xargs printf "0x%08x"`
 
 echo == Waiting for CHIP connected and jumpered in FEL mode ==
 if ! wait_for_fel; then
