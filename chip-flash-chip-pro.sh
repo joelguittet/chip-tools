@@ -92,7 +92,7 @@ UBI_MEM_ADDR=0x4b000000
 # Create temporary working directory
 TMPDIR=`mktemp -d -t chip-flash-XXXXXX`
 
-echo == Preparating spl ==
+echo == Preparing spl ==
 SPL_PADDED="$TMPDIR/sunxi-spl-padded.bin"
 SPL_PADDED_SIZE=$(($NAND_BLOCK_SIZE / $NAND_PAGE_SIZE))
 SPL_PADDED_SIZE=$(echo $SPL_PADDED_SIZE | xargs printf "0x%08x")
