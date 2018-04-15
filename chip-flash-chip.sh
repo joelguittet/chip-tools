@@ -1,11 +1,16 @@
 #!/bin/bash
 
 # Tools
+SNIB=sunxi-nand-image-builder
 FEL=sunxi-fel
 
-# NAND
+# Characteristics of the NAND
+NAND_ECC_STRENGTH=64
+NAND_ECC_STEP_SIZE=1024
+NAND_BLOCK_SIZE=4194304
 NAND_PAGE_SIZE=16384
-NAND_OOB_SIZE=1664
+NAND_USABLE_SIZE=1024
+NAND_OOB_SIZE=1280
 
 # FDT file name
 FDT_FILE=sun5i-r8-chip.dtb
@@ -41,22 +46,44 @@ wait_for_boot() {
   return 1
 }
 
+# Function used to create sunxi-spl-with-ecc.bin
+create_sunxi_spl_with_ecc_bin() {
+
+  local spl_padded_tmp_1="$TMPDIR/sunxi-spl-padded-tmp1.bin"
+  local spl_padded_tmp_2="$TMPDIR/sunxi-spl-padded-tmp2.bin"
+  local spl_padded_tmp_3="$TMPDIR/sunxi-spl-padded-tmp3.bin"
+  local spl_padded_tmp_4="$TMPDIR/sunxi-spl-padded-tmp4.bin"
+
+  ${SNIB} -c "${NAND_ECC_STRENGTH}/${NAND_ECC_STEP_SIZE}" -p "${NAND_PAGE_SIZE}" -o "${NAND_OOB_SIZE}" -u "${NAND_USABLE_SIZE}" -e "${NAND_BLOCK_SIZE}" -b -s "${SPL}" "${spl_padded_tmp_1}"
+
+  local i=0
+  local repeat=$(($NAND_BLOCK_SIZE / $NAND_PAGE_SIZE / 64))
+  local padding_size=$((64 - (`filesize $spl_padded_tmp_1` / ($NAND_PAGE_SIZE + $NAND_OOB_SIZE))))
+
+  while [ $i -lt $repeat ]; do
+    dd if=/dev/urandom of=$spl_padded_tmp_2 bs=1024 count=$padding_size
+    ${SNIB} -c "${NAND_ECC_STRENGTH}/${NAND_ECC_STEP_SIZE}" -p "${NAND_PAGE_SIZE}" -o "${NAND_OOB_SIZE}" -u "${NAND_USABLE_SIZE}" -e "${NAND_BLOCK_SIZE}" -b -s "${spl_padded_tmp_2}" "${spl_padded_tmp_3}"
+    cat $spl_padded_tmp_1 $spl_padded_tmp_3 > $spl_padded_tmp_4
+    if [ "$i" -eq "0" ]; then
+      cat $spl_padded_tmp_4 > "${SPL_PADDED}"
+    else
+      cat $spl_padded_tmp_4 >> "${SPL_PADDED}"
+    fi
+    i=$((i+1))
+  done
+}
+
 # Images directory
 IMAGES_DIR=$1
 echo "Images directory: $IMAGES_DIR"
 
 # Expected files
 SPL="$IMAGES_DIR/sunxi-spl.bin"
-SPL_PADDED="$IMAGES_DIR/sunxi-spl-with-ecc.bin"
 UBOOT="$IMAGES_DIR/u-boot-dtb.bin"
 UBI="$IMAGES_DIR/rootfs.ubi"
 
 if [[ ! -e "${SPL}" ]]; then
   echo "ERROR: file ${SPL} not found"
-  exit 1
-fi
-if [[ ! -e "${SPL_PADDED}" ]]; then
-  echo "ERROR: file ${SPL_PADDED} not found"
   exit 1
 fi
 if [[ ! -e "${UBOOT}" ]]; then
@@ -77,10 +104,71 @@ UBI_MEM_ADDR=0x4b000000
 # Create temporary working directory
 TMPDIR=`mktemp -d -t chip-flash-XXXXXX`
 
-# Compute SPL_PADDED_SIZE in pages
-SPL_PADDED_SIZE=$(filesize "${SPL_PADDED}")
-SPL_PADDED_SIZE=$(($SPL_PADDED_SIZE / ($NAND_PAGE_SIZE + $NAND_OOB_SIZE)))
+# Step 1: Detection of NAND characteristics
+
+echo == Preparing u-boot ==
+UBOOT_PADDED_SIZE=0x400000
+UBOOT_PADDED="$TMPDIR/u-boot-padded-dtb.bin"
+dd if="$UBOOT" of="$UBOOT_PADDED" bs=4M conv=sync
+echo OK
+
+echo == Preparing u-boot script ==
+UBOOT_SCRIPT_SRC="$TMPDIR/u-boot-script.txt"
+UBOOT_SCRIPT_BIN="$TMPDIR/u-boot-script.bin"
+echo "nand info" > "${UBOOT_SCRIPT_SRC}"
+echo "env export -t -s 0x100 0x7c00 nand_erasesize nand_writesize nand_oobsize" >> "${UBOOT_SCRIPT_SRC}"
+echo "reset" >> "${UBOOT_SCRIPT_SRC}"
+mkimage -A arm -T script -C none -n "u-boot script" -d "${UBOOT_SCRIPT_SRC}" "${UBOOT_SCRIPT_BIN}"
+echo OK
+
+echo == Waiting for CHIP connected and jumpered in FEL mode ==
+if ! wait_for_fel; then
+  echo "ERROR: please make sure CHIP is connected and jumpered in FEL mode"
+  exit 1
+fi
+echo OK
+
+echo == Upload spl to SRAM and execute it ==
+${FEL} spl "${SPL}"
+echo OK
+
+# Wait for DRAM initialization to complete
+sleep 1
+
+echo == Upload u-boot to SRAM ==
+${FEL} write $UBOOT_MEM_ADDR "${UBOOT_PADDED}" || ( echo "ERROR: could not write ${UBOOT_PADDED}" && exit $? )
+echo OK
+
+echo == Upload u-boot script to SRAM ==
+${FEL} write $UBOOT_SCRIPT_MEM_ADDR "${UBOOT_SCRIPT_BIN}" || ( echo "ERROR: could not write ${UBOOT_SCRIPT_BIN}" && exit $? )
+echo OK
+
+echo == Execute the main u-boot binary ==
+${FEL} exe $UBOOT_MEM_ADDR || ( echo "ERROR: could not execute u-boot binary" && exit $? )
+echo OK
+
+echo == Waiting for CHIP connected and jumpered in FEL mode ==
+if ! wait_for_fel; then
+  echo "ERROR: please make sure CHIP is connected and jumpered in FEL mode"
+  exit 1
+fi
+echo OK
+
+echo == Read NAND info ==
+${FEL} read 0x7c00 0x100 "$TMPDIR/nand.info"
+NAND_BLOCK_SIZE="$(printf '%d' 0x$(cat $TMPDIR/nand.info | awk -F= '/erase/ {print $2}'))"
+NAND_PAGE_SIZE="$(printf '%d' 0x$(cat $TMPDIR/nand.info | awk -F= '/write/ {print $2}'))"
+NAND_OOB_SIZE="$(printf '%d' 0x$(cat $TMPDIR/nand.info | awk -F= '/oob/ {print $2}'))"
+echo OK
+
+# Step 2: Flashing of the target
+
+echo == Preparing spl ==
+SPL_PADDED="$TMPDIR/sunxi-spl-padded.bin"
+SPL_PADDED_SIZE=$(($NAND_BLOCK_SIZE / $NAND_PAGE_SIZE))
 SPL_PADDED_SIZE=$(echo $SPL_PADDED_SIZE | xargs printf "0x%08x")
+create_sunxi_spl_with_ecc_bin
+echo OK
 
 # Compute UBI size in bytes
 UBI_SIZE=`filesize $UBI | xargs printf "0x%08x"`
